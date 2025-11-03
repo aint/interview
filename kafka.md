@@ -3,12 +3,13 @@
 ## Table of Contents
 1. [Core Concepts](#core-concepts)
 2. [Architecture Components](#architecture-components)
-3. [Message Delivery Semantics](#message-delivery-semantics)
-4. [Replication & High Availability](#replication--high-availability)
-5. [Consumer Groups & Partitioning](#consumer-groups--partitioning)
-6. [Performance & Scalability](#performance--scalability)
-7. [Common Challenges](#common-challenges)
-8. [Key Configuration Settings](#key-configuration-settings)
+3. [Metadata Management: Zookeeper & KRaft](#metadata-management-zookeeper--kraft)
+4. [Message Delivery Semantics](#message-delivery-semantics)
+5. [Replication & High Availability](#replication--high-availability)
+6. [Consumer Groups & Partitioning](#consumer-groups--partitioning)
+7. [Performance & Scalability](#performance--scalability)
+8. [Common Challenges](#common-challenges)
+9. [Key Configuration Settings](#key-configuration-settings)
 
 ---
 
@@ -99,6 +100,32 @@ A client library for building stream processing applications. Allows you to:
 - Process streams of data in real-time
 - Perform transformations, aggregations, joins
 - Build stateful stream processing applications
+
+---
+
+## Metadata Management: Zookeeper & KRaft
+
+Kafka requires coordination and metadata management. Historically, Kafka used **Apache Zookeeper**, but newer versions (2.8.0+) introduced **KRaft (Kafka Raft)** mode, which eliminates the Zookeeper dependency.
+
+### Zookeeper-Based Architecture
+
+**Zookeeper's Role**: Stores cluster metadata (brokers, topics, partitions), manages controller election, tracks broker health.
+
+**Leader Election with Zookeeper**:
+- **Controller Election**: Brokers compete to create ephemeral node `/controller` in Zookeeper; only one succeeds
+- **Partition Leader Election**: Controller detects leader failure via Zookeeper, selects new leader from ISR, updates metadata in Zookeeper
+
+**Limitations**: Single controller bottleneck, scalability limits (~200K partitions), requires separate Zookeeper cluster, slower metadata operations.
+
+### KRaft Mode (Zookeeper-Free)
+
+**Architecture**: Uses **Raft consensus algorithm** with multiple quorum controllers (typically 3-5). Metadata stored in internal Kafka topic `__cluster_metadata`. No external dependency.
+
+**Leader Election in KRaft**:
+- **Controller Election**: Raft algorithm elects leader controller automatically within quorum
+- **Partition Leader Election**: Controller selects new leader from ISR, but metadata updates use Raft consensus instead of Zookeeper
+
+**Benefits**: Scales to millions of partitions (vs ~200K with Zookeeper), faster metadata operations, better handling of network partitions, no external dependency.
 
 ---
 
@@ -316,3 +343,8 @@ When using auto-commit (default), you get **no guarantees**:
 - When would you use a key vs no key? (Key for ordering per key, no key for load distribution)
 - How does consumer lag work? (Difference between latest offset and consumer offset)
 - What is ISR? (In-Sync Replicas - replicas caught up with leader)
+- What is Zookeeper's role in Kafka? (Metadata storage, controller election, broker registration)
+- How does leader election work in Kafka? (Controller selects new leader from ISR when leader fails)
+- What is KRaft mode? (Zookeeper-free mode using Raft consensus for metadata management)
+- What are the benefits of KRaft over Zookeeper? (Better scalability, simplified operations, no external dependency)
+- How does controller election work? (Zookeeper: ephemeral node creation; KRaft: Raft consensus)
