@@ -1,6 +1,12 @@
 # Kubernetes
 
-![Cheat Sheet](https://raw.githubusercontent.com/aint/interview/refs/heads/main/k8s_cheatsheet.png)
+<details>
+<summary>📊 Cheat Sheet</summary>
+
+![Cheat Sheet](k8s_cheatsheet.png)
+
+</details>
+</br>
 
 **Kubernetes (K8s)** is an open-source container orchestration platform that automates the deployment, scaling, and management of containerized applications.
 
