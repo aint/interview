@@ -1,8 +1,15 @@
-# Interview
+<div align="center">
 
-Notes for preparing for technical interviews.
+![Interview Prep Logo](logo.png)
+
+# Interview Prep
+
+**Technical interview preparation notes and cheat sheets**
+
+</div>
+
 
 ## Topics
 
-- [Kubernetes](k8s.md)
-- [Kafka](kafka.md)
+- [Kubernetes](notes/k8s.md)
+- [Kafka](notes/kafka.md)
