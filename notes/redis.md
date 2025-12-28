@@ -123,12 +123,17 @@ Redis offers two persistence mechanisms to survive restarts:
    - Guarantees latest data
    - Trade-off: Master becomes bottleneck
 
-2. **Eventual Consistency (Read Replicas)**:
+2. **Strong Consistency with WAIT**:
+   - Use `WAIT` command to ensure writes are replicated to N replicas before returning
+   - Reads from those acknowledged replicas will see the write (strong consistency)
+   - Trade-off: Increased write latency, must wait for replica acknowledgment
+
+3. **Eventual Consistency (Read Replicas)**:
    - Reads can go to replicas
    - Replicas may lag behind master
    - Trade-off: May read stale data
 
-3. **Causal Consistency (Redis Cluster)**:
+4. **Causal Consistency (Redis Cluster)**:
    - Within a slot, operations are ordered (if key A and key B are in the same slot, writes to A then B are seen in that order by all clients. If they're in different slots, clients might see B before A)
    - Cross-slot operations may not be ordered
    - Trade-off: Complexity in distributed scenarios
@@ -144,6 +149,7 @@ Redis offers two persistence mechanisms to survive restarts:
 ### Handling Staleness
 
 - **Read-after-write**: Read from master after writes
+- **WAIT command**: Use `WAIT` to ensure writes are replicated before returning (enables strong consistency with replicas)
 - **Version numbers**: Use version fields to detect stale reads
 - **TTL-based invalidation**: Use expiration to limit staleness window
 
@@ -155,7 +161,8 @@ Redis offers two persistence mechanisms to survive restarts:
 
 - **Master**: Handles all writes and reads
 - **Replica**: Receives write stream from master, serves read requests
-- **Async replication**: Replicas asynchronously replicate data from master
+- **Async replication**: Replicas asynchronously replicate data from master.
+- Optional **sync replication** with `WAIT`
 - **Multiple replicas**: Can have multiple replicas for read scaling
 
 ### High Availability with Sentinel
