@@ -15,3 +15,4 @@
 - [Kafka](notes/kafka.md)
 - [Redis](notes/redis.md)
 - [JVM](notes/jvm.md)
+- [Methodologies](notes/methodologies.md)
