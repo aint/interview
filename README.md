@@ -11,6 +11,7 @@
 
 ## Topics
 
+- [System Capacity & Scale](notes/capacity_scale.md)
 - [Docker](notes/docker.md)
 - [Kubernetes](notes/k8s.md)
 - [Kafka](notes/kafka.md)
