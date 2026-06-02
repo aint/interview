@@ -9,12 +9,13 @@ Back-of-the-envelope math for capacity planning: estimate traffic → storage �
 4. [Storage & Retention](#storage--retention)
 5. [Bandwidth](#bandwidth)
 6. [System Throughput Limits](#system-throughput-limits)
-7. [Store Selection](#store-selection--nosql-trade-offs)
-8. [Why Writes Are Hard (RDBMS)](#why-writes-are-hard-rdbms)
-9. [Scaling Levers](#scaling-levers)
-10. [Capacity Planning Checklist](#capacity-planning-checklist)
-11. [Worked Example](#worked-example)
-12. [Interview Drill Questions](#interview-drill-questions)
+7. [Hockey Stick Latency Curve](#hockey-stick-latency-curve)
+8. [Store Selection (SQL vs NoSQL)](#store-selection-sql-vs-nosql)
+9. [Why Writes Are Hard (RDBMS)](#why-writes-are-hard-rdbms)
+10. [Scaling Levers](#scaling-levers)
+11. [Capacity Planning Checklist](#capacity-planning-checklist)
+12. [Worked Example](#worked-example)
+13. [Interview Drill Questions](#interview-drill-questions)
 
 ---
 
@@ -87,6 +88,8 @@ Use this order in every design interview:
 daily_actions     = DAU × actions_per_user_per_day
 average_QPS       = daily_actions / 86,400   (round to 100,000 in interviews)
 peak_QPS          = average_QPS × peak_factor
+total_QPS         = peak_QPS (for capacity limits)
+total_QPS         = average_QPS (for steady-state cost)
 ```
 
 **Peak factor**: typically **2×–5×** average. Use 3× as a safe default; say why (time zones, lunch/evening spikes, viral events).
@@ -100,14 +103,19 @@ read_QPS  = total_QPS × read_ratio
 write_TPS = total_QPS × write_ratio
 ```
 
+Example: `total_QPS = 15,000` (peak), ratio **100:1** → `read_QPS ≈ 14,850`, `write_TPS ≈ 149`.
+
 Design for **peak write TPS** when choosing the primary database.
 
 ### Concurrent users vs QPS
 
 Not the same. 1M concurrent users with 1 action/minute ≈ **~17,000 QPS**, not 1M QPS.
+
 ```
-1,000,000 users × (1 action / 60 seconds) = 1,000,000 / 60 ≈ 16,667 QPS ≈ ~17,000 QPS
+total_QPS = concurrent_users × (actions_per_user_per_second)
 ```
+
+Example: 1M users, 1 action/minute each → `1,000,000 / 60 ≈ 17,000` total QPS (not 1M).
 
 ---
 
@@ -163,8 +171,8 @@ There is no fixed software TPS cap. Limits depend on hardware, workload shape, p
 | System | Typical throughput | Main constraint |
 |--------|-------------------|-----------------|
 | PostgreSQL / MySQL (single node) | **10k–40k write TPS** (tuned, NVMe) | WAL/fsync, row/index locking |
-| PostgreSQL / MySQL reads | **50k–200k+ read QPS** (cache + replicas) | Replica lag, cache invalidation |
-| Aurora (MySQL/PostgreSQL) | Reads scale with replicas; storage auto-grows | Writer still single-node; cross-AZ latency |
+| PostgreSQL / MySQL reads | **50k–200k+ aggregate read QPS** (Redis/Memcached + read replicas) | Replica lag, cache invalidation |
+| Aurora (MySQL/PostgreSQL) | Reads scale with replicas (up to 15 in a region) | Writer still single-node; cross-AZ latency |
 | CockroachDB / YugabyteDB / Spanner | Scales with cluster (100k+ TPS possible) | Consensus latency on every write |
 
 ### NoSQL & specialized stores
@@ -199,7 +207,102 @@ There is no fixed software TPS cap. Limits depend on hardware, workload shape, p
 
 ---
 
-## Store Selection
+## Hockey Stick Latency Curve
+
+Throughput does **not** scale linearly with load on any store or service. While headroom remains, p99 latency stays relatively flat — then the curve bends sharply at a **knee** (workload- and system-dependent):
+
+```
+latency
+    │                              ╱  ← latency explodes
+    │                            ╱
+    │                          ╱
+    │────────────────────────╱   ← knee (see table below)
+    │                        │
+    └────────────────────────┴────────► load (TPS / QPS / ops/s)
+         flat region              plateau / collapse
+```
+
+**Flat region (under the knee):** CPU, memory, disk, network, or partition capacity has headroom. More load adds modest queueing; latency grows slowly.
+
+**Knee:** A bottleneck saturates — WAL `fsync`, a hot partition, single Redis thread, S3 prefix limit, etc. Small load increases no longer buy proportional throughput.
+
+**Post-knee:** Throughput **plateaus or drops** (retries, lock waits, throttling, checkpoint stalls) while latency shoots up. Fix by staying below the knee or removing the bottleneck (shard, async, scale out, different store).
+
+Sharded clusters have **one knee per shard/partition** — aggregate throughput can look healthy while a hot shard hockey-sticks.
+
+**Interview line:** "I'd size below ~60–70% of measured knee throughput so viral spikes stay on the flat part of the curve, not the vertical wall."
+
+---
+
+## Store Selection (SQL vs NoSQL)
+
+**Default to RDBMS for transactional data; justify NoSQL when the access pattern demands it.**
+
+Start with Postgres (or MySQL) for core business data. Only introduce NoSQL, queues, or object storage when you can name a concrete bottleneck — write TPS, hot keys, search, cache, blob storage — that SQL alone cannot solve cleanly.
+
+### Relational / OLTP — the default
+
+| Use RDBMS when | Examples |
+|----------------|----------|
+| Data must stay consistent across entities | Orders + inventory, payments + ledger, account balances |
+| You need ad-hoc queries and joins | Reporting, admin tools, evolving product queries |
+| Constraints enforce business rules | UNIQUE email, FK order → user, CHECK balance ≥ 0 |
+| Transactions span multiple rows/tables | Transfer money, reserve inventory, create order + line items |
+| Write TPS fits a single primary (see [System Throughput Limits](#system-throughput-limits)) | Most SaaS, e-commerce, fintech up to ~10k–40k write TPS |
+
+**What SQL is good at:** flexible schema with strong invariants, multi-table joins, indexes for varied read patterns, mature tooling (migrations, backups, replication), and full ACID without application-level compensation logic.
+
+**What SQL is bad at alone:** unbounded horizontal writes on one primary, full-text search at scale, sub-ms hot-key counters, blob/media storage, and firehose append-only ingest at millions of events/s.
+
+### Picking a relational engine
+
+| Engine | Strengths | When to pick |
+|--------|-----------|--------------|
+| **PostgreSQL** | Rich types (JSON, arrays), partial indexes, strong extensibility | Default choice; complex queries, JSON columns, geo/full-text via extensions |
+| **MySQL / Aurora** | Wide managed hosting, read-replica scaling on Aurora | Existing MySQL fleet, AWS-native stack, read-heavy OLTP |
+| **CockroachDB / YugabyteDB / Spanner** | Horizontal write scale + SQL | Peak write TPS exceeds single-node Postgres; need global distribution + strong consistency |
+
+Distributed SQL trades **consensus latency on every write** for horizontal scale. Don't reach for it until single-node Postgres + sharding/async paths are clearly insufficient.
+
+### Scaling SQL before leaving SQL
+
+Apply these in order — most systems never need more:
+
+1. **Indexes + query tuning** — fix slow reads/writes before changing stores (see [sql.md](./sql.md)).
+2. **Connection pooling** — PgBouncer, HikariCP; DB CPU spent on connect/auth is wasted.
+3. **Read replicas** — offload read QPS; primary handles writes only. Accept replica lag for non-critical reads.
+4. **Cache (Redis)** — hot keys, sessions, rate limits; cache-aside for read-heavy paths.
+5. **Async writes (Kafka/SQS)** — decouple user-facing latency from durable ingest for events, logs, notifications.
+6. **Shard the primary** — split by `user_id`, `tenant_id`, or time when peak write TPS exceeds single-node headroom.
+
+Read replicas **do not** increase write TPS — they only scale reads. When write TPS is the bottleneck, shard, async, or move append-heavy data to a write-optimized store.
+
+### Hybrid architecture — the norm at scale
+
+Production systems rarely use one database. Name the **source of truth** and how everything else stays in sync:
+
+| Layer | Store | Role |
+|-------|-------|------|
+| **Source of truth** | Postgres / MySQL | Accounts, orders, payments, inventory — anything needing ACID |
+| **Cache** | Redis | Sessions, hot reads, rate limits, leaderboards |
+| **Search index** | Elasticsearch | Full-text product/user search (rebuilt from DB via CDC or outbox) |
+| **Event log** | Kafka | Activity stream, async workers, analytics pipeline |
+| **Blob / media** | S3 + CDN | Images, video, exports — never BLOB columns at scale |
+| **Analytics** | ClickHouse / BigQuery | Dashboards and aggregations — never query production OLTP for heavy reports |
+
+Sync patterns: **CDC** (Debezium), **transactional outbox** (write event in same DB txn → worker publishes), **async workers**, **periodic batch rebuild**. Say which pattern you pick and why.
+
+### When to leave SQL (justify NoSQL)
+
+| Signal | Consider | Instead of |
+|--------|----------|------------|
+| Peak write TPS > single-node Postgres with headroom | Cassandra, sharded DynamoDB, Kafka ingest | Forcing all writes through one primary |
+| Access pattern is key-only, no joins | DynamoDB, Redis | Relational model with unused join capability |
+| Flexible nested documents, schema varies per record | MongoDB | Wide nullable columns or EAV anti-patterns in SQL |
+| Full-text + faceted search | Elasticsearch (+ SQL as source of truth) | `LIKE '%term%'` or heavy Postgres full-text at scale |
+| Graph traversal (friends-of-friends, fraud rings) | Neo4j, Neptune, or precomputed adjacency in SQL | Deep recursive joins |
+| Append-only firehose (IoT, logs, activity) | Kafka → Cassandra / S3 | Synchronous INSERT per event into OLTP |
+| Sub-ms reads/writes on ephemeral data | Redis | Postgres on every request |
 
 ### NoSQL categories (know which bucket you're in)
 
@@ -212,7 +315,7 @@ There is no fixed software TPS cap. Limits depend on hardware, workload shape, p
 | **Search** | Elasticsearch, OpenSearch | Full-text search, faceted filtering, log analytics |
 | **OLAP / columnar** | ClickHouse, BigQuery, Redshift | Aggregations, dashboards, reporting (not live OLTP) |
 
-### Core NoSQL trade-offs (vs RDBMS)
+### Core NoSQL trade-offs (what you give up vs RDBMS)
 
 | Gain | Cost |
 |------|------|
@@ -234,6 +337,12 @@ There is no fixed software TPS cap. Limits depend on hardware, workload shape, p
 CAP shorthand: under partition, choose **CP** (consistent but may reject writes) or **AP** (available but stale). Most distributed systems let you tune per operation.
 
 ### Per-system quick notes
+
+**PostgreSQL / MySQL**
+- Default OLTP store: ACID transactions, joins, constraints, secondary indexes.
+- Single primary handles all writes; read replicas + Redis scale **aggregate** reads (~50k–200k+ read QPS), not one node alone (~10k–50k).
+- Good: orders, accounts, inventory, anything needing invariants. Bad: hot global counters, blob storage, search at scale, write TPS beyond single-node headroom.
+- Scale path: pool → replicas → cache → async → shard (see [Scaling SQL before leaving SQL](#scaling-sql-before-leaving-sql)).
 
 **MongoDB**
 - Document model with secondary indexes; shard by `shard key` (often `user_id`).
@@ -273,20 +382,23 @@ Example: 2 KB item, 500 writes/s → 500 × 2 = **1,000 WCU** (fills one partiti
 
 | Use case | Prefer | Avoid |
 |----------|--------|-------|
-| Orders, payments, inventory | RDBMS (Postgres) | Eventual-consistency NoSQL as sole store |
+| Orders, payments, inventory | **RDBMS (Postgres)** — source of truth | Eventual-consistency NoSQL as sole store |
+| User profiles, accounts | **RDBMS** | DynamoDB unless access is strictly key-value at huge scale |
 | User session / cache | Redis | Postgres on every request |
 | Activity log / events | Kafka → Cassandra or S3 | Synchronous writes to RDBMS |
-| Product search | Elasticsearch (+ Postgres source of truth) | SQL `LIKE` at scale |
+| Product search | Elasticsearch + **Postgres as source of truth** | SQL `LIKE` at scale |
 | User-uploaded media | S3 + CDN | BLOB columns in RDBMS |
 | Real-time analytics dashboard | ClickHouse / OLAP pipeline | Querying production OLTP DB |
-| Social graph traversal | Graph DB or precomputed adjacency | Deep recursive SQL joins |
-| Global counter (likes, views) | Redis / sharded counters / approximate (HyperLogLog) | Single row `UPDATE` in RDBMS |
+| Social graph traversal | Graph DB or precomputed adjacency in **Postgres** | Deep recursive SQL joins at query time |
+| Global counter (likes, views) | Redis / sharded counters / HyperLogLog | Single row `UPDATE` in RDBMS |
 
-Say which store owns **source of truth** and how others stay in sync (CDC, outbox pattern, async workers).
+**Interview close:** "Postgres owns accounts and orders. Redis caches sessions. Kafka ingests activity events. Elasticsearch indexes products via outbox. S3 stores media."
 
 ---
 
 ## Why Writes Are Hard (RDBMS)
+
+See [Hockey Stick Latency Curve](#hockey-stick-latency-curve) for the saturation pattern; below is why a single relational primary hits its knee early.
 
 ### The WAL / fsync bottleneck
 
