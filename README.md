@@ -11,7 +11,7 @@
 
 ## Topics
 
-- [System Capacity & Scale](notes/capacity_scale.md)
+- [Data Store Selection & Scaling](notes/data_store_selection.md)
 - [Docker](notes/docker.md)
 - [Kubernetes](notes/k8s.md)
 - [Kafka](notes/kafka.md)
