@@ -6,13 +6,10 @@ Pick and scale the **data layer**: throughput limits, SQL vs NoSQL, hybrid stack
 
 1. [Prerequisites from System Capacity](#prerequisites-from-system-capacity)
 2. [Store Throughput Limits](#store-throughput-limits)
-3. [Hockey Stick (Data Layer)](#hockey-stick-data-layer)
-4. [Store Selection (SQL vs NoSQL)](#store-selection-sql-vs-nosql)
-5. [Why Writes Are Hard (RDBMS)](#why-writes-are-hard-rdbms)
-6. [Data-Layer Scaling Levers](#data-layer-scaling-levers)
-7. [Data-Layer Checklist](#data-layer-checklist)
-8. [Worked Example (Data Path)](#worked-example-data-path)
-9. [Interview Drill Questions](#interview-drill-questions)
+3. [Store Selection (SQL vs NoSQL)](#store-selection-sql-vs-nosql)
+4. [Data-Layer Scaling Levers](#data-layer-scaling-levers)
+5. [Data-Layer Checklist](#data-layer-checklist)
+6. [Worked Example (Data Path)](#worked-example-data-path)
 
 ---
 
@@ -43,6 +40,18 @@ Order-of-magnitude anchors — not guarantees. Depends on hardware, workload, ke
 | CockroachDB / YugabyteDB / Spanner       | Cluster **100k+ TPS** possible                                     | Consensus latency on every write          |
 
 AWS Aurora has a hard quota of 15 read replicas per region. A self-hosted Postgres/MySQL cluster has no fixed cap — bounded by replication lag, ops cost, and connection pooling.
+
+#### Why single-node Postgres/MySQL write TPS caps (~10k–40k)
+
+Explains the **write row** in the table above — not a separate store choice. Contrast with LSM NoSQL (Cassandra) in the same table.
+
+| Mechanism | Effect |
+|-----------|--------|
+| **WAL + `fsync`** | ACID durability flushes the write-ahead log before ack → caps sequential **fsync/s** on NVMe regardless of CPU |
+| **Row / index locking (2PL)** | Conflicting writes serialize — hot keys (counters, popular rows) collapse TPS |
+| **B-tree index maintenance** | Indexes updated **in place** → random I/O per write; LSM engines append first, compact later |
+
+These produce the Postgres primary **knee** in the [hockey stick curve](./system_capacity.md#hockey-stick-latency-curve). Mitigations (pool, async, shard, write-behind counters) are in [Data-Layer Scaling Levers](#data-layer-scaling-levers).
 
 ### NoSQL & specialized stores
 
@@ -164,34 +173,6 @@ Sync: **CDC**, **transactional outbox**, async workers, batch rebuild.
 
 ---
 
-## Why Writes Are Hard (RDBMS)
-
-### WAL / fsync
-
-Durability requires WAL flush before ack → caps **fsync/s** on NVMe regardless of CPU.
-
-### Locking
-
-2PL on conflicting rows — hot keys serialize writes.
-
-### B-tree indexes
-
-In-place index updates → random I/O per write. LSM stores (Cassandra) append first, compact later.
-
-### Other DB bottlenecks
-
-
-| Bottleneck          | Mitigation                          |
-| ------------------- | ----------------------------------- |
-| Connection overhead | Pooling                             |
-| Hot partition / key | Key sharding, write-behind counters |
-| Sync replication    | Async replica where safe            |
-| Large transactions  | Smaller batches                     |
-| No app cache        | Redis cache-aside                   |
-
-
----
-
 ## Data-Layer Scaling Levers
 
 ### Single-node / primary
@@ -258,20 +239,3 @@ Single-node Postgres ceiling **~10k–40k write TPS**. At **~1.5k TPS**, primary
 ### Say it out loud
 
 > "Writes fit a single Postgres primary with headroom; reads need Redis and replicas. I'd outbox to Kafka for fan-out and index search async, not synchronous writes on the post path."
-
----
-
-## Interview Drill Questions
-
-1. 10M DAU, 20 writes/user/day, 3× peak — average and peak **write TPS**? Fits single Postgres?
-2. Peak **15k write TPS** — pool, replica, cache, async, or shard first? Why?
-3. Why Redis **500k ops/s** but Postgres **~20k write TPS**?
-4. Feed **100:1** read:write — cache where, invalidate how?
-5. Hot counter **50k updates/s** — fix without melting Postgres?
-6. DynamoDB `video_id` key, **100k writes/s** on one video — what breaks?
-7. E-commerce search — why Elasticsearch + Postgres?
-8. **10 TB logs/day** — Postgres, Cassandra, or S3?
-9. MongoDB vs Postgres vs Cassandra — one sentence each?
-10. Aurora vs self-hosted Postgres — what scales, what does not?
-
-**System-wide drills:** [system_capacity.md](./system_capacity.md#interview-drill-questions)
