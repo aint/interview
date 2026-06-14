@@ -7,15 +7,16 @@
 4. [Message Delivery Semantics](#message-delivery-semantics)
 5. [Replication & High Availability](#replication--high-availability)
 6. [Consumer Groups & Partitioning](#consumer-groups--partitioning)
-7. [Performance & Scalability](#performance--scalability)
-8. [Common Challenges](#common-challenges)
-9. [Key Configuration Settings](#key-configuration-settings)
+7. [Queues for Kafka (QfK)](#queues-for-kafka-qfk)
+8. [Performance & Scalability](#performance--scalability)
+9. [Common Challenges](#common-challenges)
+10. [Key Configuration Settings](#key-configuration-settings)
 
 ---
 
 ## Core Concepts
 
-**Kafka's mental model**: Kafka is not a queue; it's a **distributed log**. Messages are appended to an immutable log structure, which provides durability and ordering guarantees.
+**Kafka's mental model**: Kafka is fundamentally a **distributed log**. Messages are appended to an immutable log structure, which provides durability and ordering guarantees within a partition. Historically, Kafka was **not** a message queue — consumers track offsets and messages persist after consumption (pub/sub, replay, event sourcing). With **Queues for Kafka (QfK)** (GA in Apache Kafka 4.2), native queue semantics are available via **Share Groups** on the same topics used for streaming.
 
 ### Topic, Partition, and Offset
 
@@ -80,9 +81,11 @@ A consumer group is a set of consumers that work together to process a topic.
 - Each partition is consumed by **exactly one** consumer in the group
 - If you have **more consumers than partitions**, some consumers will stay idle (no work assigned)
 - If you have **fewer consumers than partitions**, some consumers will handle multiple partitions
-- Each consumer group gets its own copy of the messages (allows different applications to process the same topic independently)
+- Each consumer group reads the same log at **independent offsets** (allows different applications to process the same topic independently)
 
 **Rebalancing**: When consumers join or leave a group, Kafka redistributes partitions among the remaining consumers.
+
+**Limitation (classic model)**: Parallelism is capped by partition count — one consumer per partition per group. For worker-pool / task-queue patterns without strict ordering, see [Queues for Kafka (QfK)](#queues-for-kafka-qfk).
 
 ### Connectors
 
@@ -246,6 +249,74 @@ When using auto-commit (default), you get **no guarantees**:
 
 ---
 
+## Queues for Kafka (QfK)
+
+**Queues for Kafka (QfK)** adds native queue semantics to Apache Kafka. One platform can serve both **event streaming** (consumer groups) and **operational queuing** (share groups) on the same topic.
+
+### Kafka vs Traditional Message Queue
+
+| Aspect | Traditional MQ (RabbitMQ, IBM MQ, SQS) | Classic Kafka (Consumer Groups)  | QfK (Share Groups)   |
+|--------|----------------------------------------|----------------------------------|----------------------|
+| Model           | Point-to-point queue                         | Durable pub/sub log                | Cooperative queue on a log |
+| Consumption     | Destructive — message removed after delivery | Non-destructive — retention-based  | Per-message acquisition locks; at-least-once delivery |
+| Fan-out         | One consumer per message                     | Many independent consumer groups   | One consumer per message **within a share group** |
+| Ordering        | Often per-queue                              | Per-partition                      | **No ordering guarantee** |
+| Scale consumers | Worker pool                                  | Limited by partition count         | **Can exceed partition count** |
+| Replay          | Limited                                      | Full replay by offset/time         | Not the primary use case |
+| Exactly-once    | XA / broker transactions                     | Idempotent producer + transactions | **Not supported** (as of 4.2) |
+
+QfK is "queues done the Kafka way" — no max queue depth (but a cap on in-flight records per partition), point-in-time recovery via log retention or admin offset reset, and coexistence with streaming consumers on the same topic.
+
+### Share Groups
+
+**Share Groups** are an alternative to consumer groups for cooperative, queue-like consumption:
+
+- Each message is delivered to **exactly one** consumer **within a share group**, regardless of partition assignment
+- **Multiple consumers can process the same partition in parallel** — unlike consumer groups where each partition maps to one consumer
+- Consumer count can **exceed partition count** — add/remove workers with lighter rebalancing (no fencing)
+- **Consumer groups and share groups can coexist on the same topic** — e.g., one share group for task processing, another consumer group for analytics/replay
+
+**Record lifecycle** (broker-managed):
+
+1. Share consumer `poll()` → broker **acquires** records with a time-limited lock (default **30s**, `share.record.lock.duration.ms`)
+2. While locked, records are unavailable to other share consumers in the group
+3. Consumer acknowledges per record (explicit mode) or implicitly on next `poll()` / commit (implicit mode)
+4. **In-flight record states**: Available → Acquired → Acknowledged → Archived
+5. **Acknowledgement types** (`AcknowledgeType`): `ACCEPT` (done), `RELEASE` (retry), `REJECT` (unprocessable, stop redelivery), `RENEW` (extend lock for long processing)
+6. If consumer crashes or lock expires → record becomes available for redelivery (at-least-once)
+7. **Delivery attempt counting** (approximate, not audit-precise): default limit **5** (`group.share.delivery.attempt.limit`); exceeded → Archived (poison pill skipped)
+
+
+### When to Use QfK
+
+- **Task queues / worker pools** — backend jobs distributed across many workers; one message, one consumer
+- **Parallel processing with dynamic scaling** — scale consumers up/down without rebalancing partitions or pre-provisioning partition count
+- **Lightweight point-to-point delivery** — when fan-out and replay are not required, but Kafka durability and ecosystem are
+
+Requires messages to be **processable independently** (no strict ordering).
+
+### When NOT to Use QfK (Kafka 4.2)
+
+| Requirement | Use instead |
+|-------------|-------------|
+| Strict message ordering | Consumer groups (partition + key design) |
+| Exactly-once semantics (transactions) | Transactional producer/consumer APIs, or dedicated MQ (e.g., IBM MQ XA) |
+| Request/reply | Traditional MQ, or Kafka with reply-topic pattern |
+| Stream analytics (windowing, joins, enrichment) | Kafka Streams, Flink, Spark |
+
+Roadmap is active — many current limits are targeted for future releases.
+
+### QfK vs Consumer Groups (Quick Pick)
+
+| Need | Choice |
+|------|--------|
+| Event sourcing, replay, multiple independent readers | Consumer group |
+| Ordering per key / partition | Consumer group + keyed partitioning |
+| Worker pool, scale beyond partition count | Share group (QfK) |
+| Independent task processing, at-least-once OK | Share group (QfK) |
+
+---
+
 ## Performance & Scalability
 
 ### Message Retention
@@ -262,13 +333,17 @@ When using auto-commit (default), you get **no guarantees**:
 
 ### Scaling
 
-**Scaling consumers**: Add more consumers to a consumer group (limited by number of partitions)
+**Scaling consumers**: Add more consumers to a consumer group (limited by number of partitions). For worker pools that need more consumers than partitions, use **Share Groups (QfK)**.
 
 **Scaling producers**: Can add more producer instances (messages distributed across partitions)
 
 **Scaling brokers**:
-- Can add brokers, but requires partition reassignment (complex operation)
-- Partitions cannot be reduced, only increased
+- Adding brokers alone does not spread load — partitions must be moved onto new brokers
+- Often requires **partition reassignment** — slow, I/O-heavy, risky if done wrong
+- Partitions limitations
+   - Set at topic creation; you **can increase** partitions later
+   - You **cannot decrease** partition count — ever
+   - Existing data stays on original partitions; new partitions only affect **future** routing (no automatic reshuffle of old records)
 
 **Limitations**:
 - Number of partitions per topic affects parallelism
@@ -279,7 +354,10 @@ When using auto-commit (default), you get **no guarantees**:
 
 ## Common Challenges
 
-1. **Scaling complexity**: Kafka clusters are difficult to scale out due to stateful nature of brokers. Adding/removing brokers requires partition reassignment, which is complex and can impact performance.
+1. **Scaling complexity**: Kafka clusters are difficult to scale out due to stateful nature of brokers.
+   - **Adding brokers** → often need partition reassignment to spread partitions — slow, I/O-heavy, risky if done wrong
+   - **Increasing partitions** → consumer rebalance, possible key routing change, more file handles / metadata overhead; increase-only (cannot shrink)
+   - True resharding (even key distribution, preserve semantics) may require a **new topic** + dual-write/replay — painful migration
 
 2. **Cloud costs**: Hosting Kafka in the cloud can be expensive due to:
    - High EBS storage costs (Kafka stores all messages on disk)
@@ -295,10 +373,16 @@ When using auto-commit (default), you get **no guarantees**:
    - Messages are ordered only within a partition
    - Cross-partition ordering requires careful design (e.g., single partition per key)
 
-5. **Rebalancing**:
+5. **Rebalancing** (consumer groups):
    - Can cause temporary unavailability
    - "Stop-the-world" rebalancing pauses all consumers
    - Frequent rebalancing can indicate configuration issues (session timeouts too low, etc.)
+   - **Mitigation for task queues**: Share Groups (QfK) scale consumers without partition rebalancing
+
+6. **Partition count as parallelism ceiling** (consumer groups):
+   - More workers than partitions → idle consumers
+   - Partition count is **increase-only** — over-provision upfront or accept key-routing caveats when scaling up
+   - **Mitigation**: QfK share groups, or over-provision partitions upfront
 
 ---
 
@@ -348,3 +432,11 @@ When using auto-commit (default), you get **no guarantees**:
 - What is KRaft mode? (Zookeeper-free mode using Raft consensus for metadata management)
 - What are the benefits of KRaft over Zookeeper? (Better scalability, simplified operations, no external dependency)
 - How does controller election work? (Zookeeper: ephemeral node creation; KRaft: Raft consensus)
+- What is Queues for Kafka (QfK)? (Native queue semantics via Share Groups, GA in Kafka 4.2, KIP-932)
+- Share Groups vs Consumer Groups? (Share: one message → one consumer, scale beyond partitions, no ordering/EOS; Consumer: partition assignment, ordering per partition, replay/fan-out)
+- When should you use QfK vs consumer groups? (QfK: task queues, worker pools; Consumer groups: ordering, replay, multiple readers, transactions)
+- How does QfK delivery work? (Broker acquires records with time-limited locks; ACCEPT/RELEASE/REJECT/RENEW acknowledgements; at-least-once)
+- How are poison messages handled in QfK? (Delivery count; archived after limit, default 5)
+- Can share groups and consumer groups share a `group.id`? (No — same namespace, first use wins)
+- Is QfK destructive consumption? (No — log is retention-based; in-flight state archived via SPSO, messages not deleted from topic)
+- Is Kafka pub/sub or point-to-point? (Storage: pub/sub log; competing consumers: one consumer group; true queue semantics: QfK share groups)
