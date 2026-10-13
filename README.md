@@ -12,6 +12,7 @@
 ## Topics
 
 - [Data Store Selection & Scaling](notes/data_store_selection.md)
+- [RDBMS Internals](notes/rdbms_internals.md)
 - [Docker](notes/docker.md)
 - [Kubernetes](notes/k8s.md)
 - [Kafka](notes/kafka.md)
