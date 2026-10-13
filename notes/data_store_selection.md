@@ -110,7 +110,7 @@ Don't use distributed SQL until Postgres + pool + replicas + cache + async + sha
 
 ### Scaling SQL before leaving SQL
 
-1. **Indexes + tuning** — [sql.md](./sql.md)
+1. **Indexes + tuning** — [rdbms_internals.md](./rdbms_internals.md)
 2. **Connection pooling** — PgBouncer, ProxySQL
 3. **Read replicas** — scale reads only
 4. **Cache (Redis)** — cache-aside for hot reads
@@ -195,7 +195,7 @@ shards ≈ peak_write_TPS / per_shard_write_capacity
 
 Leave **2× headroom** for rebalance and spikes. Kafka: `partitions ≥ consumer parallelism`.
 
-See [sql.md](./sql.md), [redis.md](./redis.md), [kafka.md](./kafka.md).
+See [rdbms_internals.md](./rdbms_internals.md), [redis.md](./redis.md), [kafka.md](./kafka.md).
 
 ---
 
